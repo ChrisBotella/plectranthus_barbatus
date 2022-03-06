@@ -880,7 +880,7 @@ pCellDiff = ggplot(tmp,aes(x=year,y=cellDiff,colour=dispMode,fill=dispMode))+
   geom_line(size=1)+
   geom_ribbon(aes(ymin=lowerCellDiff,ymax=upperCellDiff),alpha=0.3,size=.3)+
   geom_point(size=2)+
-  scale_y_continuous(limits=c(-1,max(tmp$upperCellDiff)))+ylab('Relative n° of cells difference (vs full model)')+
+  scale_y_continuous(limits=c(-1,max(tmp$upperCellDiff)))+ylab('Relative nÂ° of cells difference (vs full model)')+
   theme_bw()+theme(text=element_text(size=20))
 
 
