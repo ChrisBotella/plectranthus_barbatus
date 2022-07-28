@@ -3,24 +3,31 @@ require(raster)
 require(data.table)
 require(ggplot2)
 require(ggmap)
-require(shiny)
-require(rsconnect)
 
 chDir = getwd()
-prefix = 'samples_pt21_seed'
+prefix = 'samples_pt33_seed'
+validPrefix = 'samples_pt34_seed'
 
 shinyDir = "Plectranthus_barbatus_SA_maps"
-minLogLik = -542.18
-burnin = 20
-thin = 5
+burnin = 15000
+thin = 450
 setwd(chDir)
-seeds = c(32,34,38,40)
-chs = list()
-for(seed in seeds){
-  chs[[which(seeds==seed)]]=readRDS(paste(prefix,seed,sep=""))
-}
-
+seeds = c(1:5,7:10)
+load(file="toAnalyse.Rdata")
 load(file="data_for_model")
+load(file="data_full")
+load(file="validation_kit")
+xm = range(ctab$x)[1];xM = range(ctab$x)[2]
+xRg = c(xm-(xM-xm)/10,xM+(xM-xm)/10)
+ym = range(ctab$y)[1];yM = range(ctab$y)[2]
+yRg = c(ym-(yM-ym)/10,yM+(yM-ym)/10)
+spatial_ext = extent(c(xRg,yRg))
+
+mapo = get_stamenmap( bbox = c(left=spatial_ext[1],
+                               bottom=spatial_ext[3],
+                               right=spatial_ext[2],
+                               top = spatial_ext[4]), 
+                      zoom = 8, maptype = "toner-lite")
 
 params = c('M',"theta","matur",'d_s','d_l','phi',
            'Beta','rho','pdetec','iniPop')
@@ -28,6 +35,10 @@ allParams = c('lM','theta','matur',
               'd_s','d_l','lphi',
               'Beta','rho',
               'pdetec','popIni','avgAgeRatioIni')
+
+nDS = dim(Y)[3]
+nCell = dim(x)[1]
+nYear = dim(x)[2]
 
 #####
 # Functions
@@ -42,36 +53,53 @@ panel.hist <- function(x, ...){
   rect(breaks[-nB], 0, breaks[-1], y,...)
 }
 
-
 minRho=1-(1/8.4e6)^(1/maxAge)
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
 
 # Priors
 modelPriors=list(
   prior_lM=function(val)log(dnorm(val,mean = log(2e5),sd=.5)),
   prior_theta=function(val)log(dunif(val,1e-5,100)),
-  prior_matur=function(val)log(dpois(val-1,lambda = 6)),
+  prior_matur=function(val)log(dbinom(val-1,prob=.3,6)),
   prior_d_s=function(val)log(dunif(val,0,1)),
   prior_d_l=function(val)log(dunif(val,0,1)),
   prior_lphi=function(val)log(dnorm(val,mean = log(8.4e6),sd=.7)),
-  prior_Beta=function(vals)sum(log(sapply(vals,function(val)dnorm(val,mean = 0,sd = 30)))),
+  # CUSTOMIZED FOR PLECTRANTHUS CASE
+  prior_Beta=function(vals){
+    sum(log(dnorm(vals[1:3],mean = 0,sd = 30)))+ # linear bioclim terms
+      sum(log(2*dnorm(vals[4:5],mean = 0,sd = 30)*vals[3:4]<0))+ # quadratic bioclim terms must be negative
+      sum(log(dnorm(vals[6:8],mean = 0,sd = 30)))}, # land cover rate terms 
   prior_rho=function(val)log(dunif(val,minRho,1)),
   prior_pdetec=function(vals)sum(log(sapply(vals,function(val)dunif(val,0,1)))),
   prior_popIni=function(vals)sum(log(sapply(1:length(vals),function(i)if(initN[i]>0){dunif(vals[i],0,1000)}else if(vals[i]==0){1}else{0}))),
   prior_avgAgeRatioIni=function(vals)sum(log(dunif(vals,0,1)))
-  )
+)
+
+# Priors
+sepPriors=list(
+  prior_lM=function(val)log(dnorm(val,mean = log(2e5),sd=.5)),
+  prior_theta=function(val)log(dunif(val,1e-5,100)),
+  prior_matur=function(val)log(dbinom(val-1,prob=.3,6)),
+  prior_d_s=function(val)log(dunif(val,0,1)),
+  prior_d_l=function(val)log(dunif(val,0,1)),
+  prior_lphi=function(val)log(dnorm(val,mean = log(8.4e6),sd=.7)),
+  prior_Beta=function(vals){
+    c(log(dnorm(vals[1:3],mean = 0,sd = 30)),
+    log(2*dnorm(vals[4:5],mean = 0,sd = 30)*vals[3:4]<0),
+      log(dnorm(vals[6:8],mean = 0,sd = 30))) }, 
+  prior_rho=function(val)log(dunif(val,minRho,1)),
+  prior_pdetec=function(vals)c(log(sapply(vals,function(val)dunif(val,0,1)))),
+  prior_popIni=function(vals)sum(log(sapply(1:length(vals),function(i)if(initN[i]>0){dunif(vals[i],0,1000)}else if(vals[i]==0){1}else{0}))),
+  prior_avgAgeRatioIni=function(vals)sum(log(dunif(vals,0,1)))
+)
 
 prior.sample = list(
-  prior_lM=function(n)rnorm(n,log(2e5),sd=.5),
-  prior_theta=function(val)runif(val,1e-5,100),
-  prior_matur=function(val)1+rpois(val,lambda = 6),
-  prior_d_s=function(val)runif(val,0,1),
-  prior_d_l=function(val)dunif(val,0,1),
-  prior_lphi=function(val)rnorm(val,mean = log(8.4e6),sd=.7),
-  prior_Beta=function(n)sapply(1:length(models[[1]][[1]]$Beta),function(i)rnorm(n,mean = 0,sd = 30)),
-  prior_rho=function(val)runif(val,minRho,1),
-  prior_pdetec=function(n)sapply(1:length(models[[1]][[1]]$pdetec),function(i)runif(n,0,1)),
-  prior_popIni=function(n)sapply(1:length(models[[1]][[1]]$popIni),function(i)if(initN[i]>0){runif(n,0,1000)}else{rep(0,n)}),
-  prior_avgAgeRatioIni=function(n)matrix(runif(n*length(models[[1]][[1]]$avgAgeRatioIni),0,1),n,length(models[[1]][[1]]$avgAgeRatioIni))
+  prior_popIni=function(n)sapply(1:dim(x)[1],function(i)if(initN[i]>0){runif(n,0,1000)}else{rep(0,n)}),
+  prior_avgAgeRatioIni=function(n)matrix(runif(n*dim(x)[1],0,1),n,dim(x)[1])
 )
 
 getIniPop=function(popIni,avgAgeRatioIni,maxAge){
@@ -87,7 +115,14 @@ getIniPop=function(popIni,avgAgeRatioIni,maxAge){
   }))
 }
 
-calculate.model=function(mod){
+calculate.logProb=function(momo,params){
+  for(par in params){
+    eval(parse(text=paste('momo$logProb_',par,'=momo$prior_',par,'(momo$',par,')',sep="")))
+  }
+  return(momo)
+}
+
+calculate.model = function(mod){
   theta = mod$theta
   M = exp(mod$lM)
   matur = mod$matur
@@ -110,7 +145,7 @@ calculate.model=function(mod){
   for(t in 2:nYear){
     mod$s_prod[,t-1] = mod$n[,t-1,]%*%matrix(mod$fecund,maxAge,1)
     mod$s[,t-1] = mod$disp_to_from%*%mod$s_prod[,t-1,drop=F]
-    pre_p = x[,t,]%*%matrix(Beta,dim(x)[3],1)
+    pre_p = cbind(rep(1,dim(x)[1]),x[,1,])%*%matrix(Beta,dim(x)[3]+1,1)
     mod$p[,t] = exp(pre_p)/(1+exp(pre_p))
     survive = round((1-rho)*mod$n[,t-1,1:(maxAge-1)])
     mod$COMP[,t-1] = sapply(1:nCell,function(i){
@@ -129,13 +164,6 @@ calculate.model=function(mod){
     }
   }
   return(mod)
-}
-
-calculate.logProb=function(momo,params){
-  for(par in params){
-    eval(parse(text=paste('momo$logProb_',par,'=momo$prior_',par,'(momo$',par,')',sep="")))
-  }
-  return(momo)
 }
 
 calculate.logLik = function(mod,params){
@@ -186,32 +214,24 @@ multiplot <- function(plots=NULL, file, cols=1, layout=NULL) {
   }
 }
 
-get.models.chain.list = function(chain,params,its){
-  models = list()
-  k= 1
-  for(j in its){
-    flush.console()
-    cat('\r iteration ',j-1)
-    models[[k]] = modelPriors
-    models[[k]]$theta = chain[[j]]$theta
-    models[[k]]$lM = chain[[j]]$lM
-    models[[k]]$matur = chain[[j]]$matur
-    models[[k]]$d_s = chain[[j]]$d_s
-    models[[k]]$d_l = chain[[j]]$d_l
-    models[[k]]$lphi = chain[[j]]$lphi
-    models[[k]]$Beta = chain[[j]]$Beta
-    models[[k]]$pdetec = chain[[j]]$pdetec
-    models[[k]]$rho = chain[[j]]$rho
-    models[[k]]$iniPop = chain[[j]]$iniPop
-    models[[k]]$popIni=chain[[j]]$popIni
-    models[[k]]$avgAgeRatioIni=chain[[j]]$avgAgeRatioIni
-    models[[k]] = calculate.model(models[[k]])
-    models[[k]] = calculate.logProb(models[[k]],params)
-    models[[k]] = calculate.logLik(models[[k]],params)
-    k=k+1
-  }
-  names(models)=its
-  return(models)
+get.model=function(proto,params){
+  model = modelPriors
+  model$theta = proto$theta
+  model$lM = proto$lM
+  model$matur = proto$matur
+  model$d_s = proto$d_s
+  model$d_l = proto$d_l
+  model$lphi = proto$lphi
+  model$Beta = proto$Beta
+  model$pdetec = proto$pdetec
+  model$rho = proto$rho
+  model$iniPop = proto$iniPop
+  model$popIni=proto$popIni
+  model$avgAgeRatioIni=proto$avgAgeRatioIni
+  model = calculate.model(model)
+  model = calculate.logProb(model,params)
+  model = calculate.logLik(model,params)
+  return(model)
 }
 
 get.dynamic = function(mod){
@@ -224,6 +244,7 @@ get.dynamic = function(mod){
   ssh = rep(NA,nYear)
   ntl = rep(NA,nYear)
   ntsh = rep(NA,nYear)
+  Shanon = rep(NA,nYear)
   Disp = mod$disp_to_from
   diag(Disp) = 0
   Displ = (1 - Adj)*Disp
@@ -231,18 +252,21 @@ get.dynamic = function(mod){
   DisplFrom = colSums(Displ)
   DispshFrom = colSums(Dispsh)
   for(year in 1:nYear){
-    sl[year] = round(sum(mod$s_prod[,year] * DisplFrom))
-    ssh[year] = round(sum(mod$s_prod[,year] * DispshFrom))
+    sl[year] = sum(mod$s_prod[,year] * DisplFrom)
+    ssh[year] = sum(mod$s_prod[,year] * DispshFrom)
     if(year>1){
-      newTreesPerCellLD = round(mod$p[,year]*
+      newTreesPerCellLD = mod$p[,year]*
                         mod$COMP[,year-1]*
-                        colSums(mod$s_prod[,year-1] * t(Displ)) )
+                        colSums(mod$s_prod[,year-1] * t(Displ)) 
       ntl[year] = sum(newTreesPerCellLD)
-      newTreesPerCellSD = round(mod$p[,year]*
+      newTreesPerCellSD = mod$p[,year]*
                             mod$COMP[,year-1]*
-                            colSums(mod$s_prod[,year-1] * t(Dispsh)))
+                            colSums(mod$s_prod[,year-1] * t(Dispsh))
       ntsh[year] = sum(newTreesPerCellSD)
     }
+    ny = rowSums(mod$n[,year,]) + 1e-20
+    ny = ny/sum(ny)
+    Shanon[year] = -sum(ny*log(ny))
   }
   res=data.frame(year=1979+(1:nYear),
                  pop=nn,
@@ -252,10 +276,10 @@ get.dynamic = function(mod){
                  seedsLD=sl,
                  newTree=nt,
                  newTreeSD=ntsh,
-                 newTreeLD=ntl)
+                 newTreeLD=ntl,
+                 sha=Shanon)
   return(res)
 }
-
 
 refineSample = function(df){
   nNeg = min(2*sum(df$y>0),sum(df$y==0))
@@ -276,121 +300,41 @@ auc_wmw <- function(presences, scores){
   U/(length(pos) * length(neg))
 }
 
-#####
-# Compute quantities
-#####
-
-firsto = 2
-nDS = length(chs[[1]][[firsto]]$pdetec)
-nCell = dim(x)[1]
-nYear = dim(x)[2]
-
-models = list()
-for(i in 1:length(chs)){
-  cat('\n chain ',i,'\n')
-  its = seq(length(chs[[i]])-thin*((length(chs[[i]])-burnin-1)%/%thin),length(chs[[i]]),by=thin)
-  models[[i]] = 
-    get.models.chain.list(
-      chs[[i]],
-      allParams,
-      its=its)
-}
-
-
 ######
-# Parameters vs iterations
+# Figure S4.1 - 3 Parameter sample vs prior density
 ######
 
-#ich = 1
-#i = length(models[[ich]])
-#models[[ich]][[i]]$avgAgeRatioIni[initN>0]
-#models[[ich]][[i]]$popIni[initN>0]
-#sum(models[[ich]][[i]]$avgAgeRatioIni[initN>0]<1e-3)
-
-
-for(ich in 1:length(chs)){
-  its = as.numeric(names(models[[ich]]))
-  tmp = data.frame(iteration=its,chain=ich)
-  tmp$totIniPop = sapply(1:length(models[[ich]]),function(i)sum(models[[ich]][[i]]$popIni))
-  tmp$maxAgeIni = sapply(1:length(models[[ich]]),function(i) max(which(colSums(getIniPop(models[[ich]][[i]]$popIni,models[[ich]][[i]]$avgAgeRatioIni,maxAge))>0))  )  
-  tmp$M = sapply(1:length(models[[ich]]),function(i)exp(models[[ich]][[i]]$lM))
-  tmp$phi = sapply(1:length(models[[ich]]),function(i)exp(models[[ich]][[i]]$lphi))
-  for(j in 1:nDS){
-    tmp[,paste('pdetec_',j,sep="")] = 
-      sapply(1:length(models[[ich]]),
-        function(i)models[[ich]][[i]]$pdetec[j])}
-  for(j in 1:length(chs[[1]][[2]]$Beta)){
-    tmp[,paste('Beta_',j,sep="")] =
-      sapply(1:length(models[[ich]]),
-             function(i)models[[ich]][[i]]$Beta[j])
-  }
-  for(col in c('matur','theta','d_s','d_l','rho','logLikFull','logLikY','relativeLogLikY','lphi','lM')){
-    eval(parse(text=
-                 paste('tmp$',col,'=sapply(1:length(models[[ich]]),function(i)models[[ich]][[i]]$',col,')',sep="")))
-  }
-  # Summary statistics
-  tmp$mean_p = NA
-  tmp$nTot = NA
-  for(i in 1:length(models[[ich]])){
-    tmp$mean_p[i] = mean(models[[ich]][[i]]$p,na.rm=T)
-    tmp$nTot[i] = sum(as.vector(models[[ich]][[i]]$n[,,1]))+sum(as.vector(models[[ich]][[i]]$iniPop))
-  }
-  
-  range(models[[ich]][[i]]$avgAgeRatioIni)
-  
-  if(ich==1){post=tmp}else{post=rbind(post,tmp)}
-}
-
-head(post,digits=2)
-
-#####
-# Samples cutoff
-#####
-postKept = post[post$logLikFull>minLogLik,]
-cat('\n',dim(postKept)[1],' kept models for min logLikelihood: ',minLogLik)
-postKept$label= paste('ch',postKept$chain,'_it',postKept$iteration,sep="")
-
-######
-# Figure S3.2 Parameter sample vs prior density
-######
-
+setwd(chDir)
+load(file = 'toAnalyse.Rdata')
 
 pars = c('matur','theta','rho','lM',
   'd_s','d_l','pdetec','lphi','Beta')
-#pars=c('popIni','avgAgeRatioIni')
 setwd(chDir)
 seqLen = 50
-itNames=paste('iteraction_',postKept$iteration,sep="")
+itNames=paste0('iteraction_',post$iteration)
 k = 1
 pList=list()
 for(par in pars){
   print(par)
   if(par%in%c('pdetec','Beta')){
-    sample = t(sapply(1:dim(postKept)[1],function(i)chs[[as.numeric(postKept$chain[i])]][itNames[i]][[1]][par][[1]]))
-    colnames(sample)=paste(par,'_',1:dim(sample)[2],sep="")
-    
-    priorX = sapply(1:dim(sample)[2],function(i)seq(min(sample[,i])-sd(sample[,i])/3,
-                                                    max(sample[,i])+sd(sample[,i])/3,length.out=seqLen))
+    sample = post[,regexpr(par,colnames(post))>0]
+    priorX = sapply(1:dim(sample)[2],
+      function(i)seq(min(sample[,i])-sd(sample[,i])/3,
+                  max(sample[,i])+sd(sample[,i])/3,length.out=seqLen))
     colnames(priorX) = colnames(sample)
-    prior=sapply(1:dim(sample)[2],function(i){
-      priorVals = NULL
-      for(j in 1:seqLen){
-        priorVals[j] = exp(modelPriors[paste('prior_',par,sep="")][[1]](priorX[j,i]))
-      }
-      return(priorVals)
-      })
+    prior=t(sapply(1:seqLen,function(j)exp(sepPriors[paste0('prior_',par)][[1]](priorX[j,]))))
     colnames(prior)=colnames(sample)
-  }else if(par%in%c('popIni','avgAgeRatioIni')){
-    sample = t(sapply(1:dim(postKept)[1],function(i)chs[[as.numeric(postKept$chain[i])]][itNames[i]][[1]][par][[1]][initN>0]))
-    colnames(sample)=paste(par,'_',1:dim(sample)[2],sep="")
-    prior=prior.sample[paste('prior_',par,sep="")][[1]](nSamp)[,initN>0]
-    colnames(prior)=colnames(sample)
+    if(par=="Beta"){
+      sample=sample[,!colnames(sample)%in%paste0('Beta_',4:5)]
+      prior = prior[,!colnames(prior)%in%paste0('Beta_',4:5)]
+      priorX = priorX[,!colnames(priorX)%in%paste0('Beta_',4:5)]
+    }
   }else{
-    vec=sapply(1:dim(postKept)[1],function(i)chs[[as.numeric(postKept$chain[i])]][itNames[i]][[1]][par][[1]])
-    sample = matrix(vec,dim(postKept)[1],1)
+    vec=sapply(1:dim(post)[1],function(i)chs[[as.numeric(post$chain[i])]][itNames[i]][[1]][par][[1]])
+    sample = matrix(vec,dim(post)[1],1)
     colnames(sample)=par
     if(par=="matur"){
-      custom = seq(0,6,.05)
+      custom = seq(0,10,1)
       priorX = matrix(custom,length(custom),1)
     }else{
       priorX = matrix(seq(min(sample[,1])-sd(sample[,1])/3,
@@ -406,7 +350,8 @@ for(par in pars){
     if(length(breaks)>2*dim(sample)[1]){breaks=hist(sample[,col],plot=F)$breaks}
     forPrior = data.frame(x=priorX[,col],y=prior[,col])
     forPost = data.frame(x=sample[,col])
-    pList[[k]] = ggplot()+geom_line(data=forPrior,aes(x=x,y=y),col="blue",size=1)+
+    pList[[k]] = ggplot()+
+      geom_line(data=forPrior,aes(x=x,y=y),col="blue",size=1)+
       geom_histogram(data=forPost,breaks=breaks,aes(x=x,y=..density..),fill="red",alpha=.5)+
       scale_x_continuous(limits=c(min(priorX[,col]),max(priorX[,col])))+ggtitle(col)+theme_bw()
     k=k+1
@@ -417,19 +362,70 @@ png('Z_post_priors.png',height=1000,width=666)
 multiplot(pList,cols=4)
 dev.off()
 
+par=c('popIni')
+k = 1
+pList=list()
+print(par)
+sample = t(sapply(1:dim(post)[1],function(i)chs[[as.numeric(post$chain[i])]][itNames[i]][[1]][par][[1]][initN>0]))
+colnames(sample)=paste0(par,'_cell_',which(initN>0))
+forPrior=data.frame(x=c(.01,999.99),y=dunif(c(.01,999.99),min = 0,max = 1000))
+for(col in colnames(sample)){
+  breaks = hist(sample[,col],plot=F,breaks="fd")$breaks
+  if(length(breaks)>2*dim(sample)[1]){breaks=hist(sample[,col],plot=F)$breaks}
+  forPost = data.frame(x=sample[,col],type='posterior')
+  pList[[k]] = ggplot()+
+    geom_histogram(data=forPost,breaks=breaks,aes(x=x,y=..density..),alpha=.5,fill='red')+
+    geom_line(data=forPrior,aes(x=x,y=y),color='blue')+
+    scale_x_continuous(limits=c(0,1000))+
+    ggtitle(col)+theme_bw()+theme(legend.position = 'None')
+  k=k+1
+}
+
+setwd(chDir)
+png('Z_post_priors_popIni.png',height=1000,width=666)
+multiplot(pList,cols=4)
+dev.off()
+
+par='avgAgeRatioIni'
+k = 1
+pList=list()
+print(par)
+sample = t(sapply(1:dim(post)[1],function(i)chs[[as.numeric(post$chain[i])]][itNames[i]][[1]][par][[1]][initN>0]))
+colnames(sample)=paste0(par,'_cell_',which(initN>0))
+forPrior=data.frame(x=c(.01,.99),y=dunif(c(.01,.99),min = 0,max = 1))
+for(col in colnames(sample)){
+  breaks = hist(sample[,col],plot=F,breaks="fd")$breaks
+  if(length(breaks)>2*dim(sample)[1]){breaks=hist(sample[,col],plot=F)$breaks}
+  forPost = data.frame(x=sample[,col],type='posterior')
+  pList[[k]] = ggplot()+
+    geom_histogram(data=forPost,breaks=breaks,aes(x=x,y=..density..),alpha=.5,fill='red')+
+    geom_line(data=forPrior,aes(x=x,y=y),color='blue')+
+    scale_x_continuous(limits=c(0,1))+
+    ggtitle(col)+theme_bw()+theme(legend.position = 'None')
+  k=k+1
+}
+
+setwd(chDir)
+png('Z_post_priors_avgAgeRatioIni.png',height=1000,width=666)
+multiplot(pList,cols=4)
+dev.off()
+  
 ######
-# Figure S3.3 Parameters correlation matrix (Identifiability)
+# Figure S4.4 Parameters correlation matrix (Identifiability)
 ######
 
-#reOrd = c('theta','matur','M','d_s','d_l','phi','rho','mean_p',
-#          'pdetec_1','pdetec_2','pdetec_3','nTot')
+setwd(chDir)
+load(file = 'toAnalyse.Rdata')
+
+#reOrd = c('matur','theta','rho','M','d_s','d_l','pdetec_1','pdetec_2','pdetec_3',
+#          'phi','nTot','Beta_1','Beta_2','Beta_5','Beta_6','Beta_7')
 reOrd = c('matur','theta','rho','M','d_s','d_l','pdetec_1','pdetec_2','pdetec_3',
-          'phi','nTot')
+          'phi','Beta_1','Beta_2','Beta_3','Beta_6','Beta_7','Beta_8')
 
-parVals = postKept
-for(col in c('theta','M','d_s','d_l','phi','rho','mean_p',
-          'pdetec_1','pdetec_2','pdetec_3','nTot')){
-  eval(parse(text=paste('parVals$',col,'=','log10(postKept$',col,')',sep="")))
+parVals = post
+for(col in c('theta','M','d_s','d_l','phi','rho',
+          'pdetec_1','pdetec_2','pdetec_3')){
+  eval(parse(text=paste('parVals$',col,'=','log10(post$',col,')',sep="")))
 }
 
 corMat=matrix(NA,length(reOrd),length(reOrd))
@@ -442,168 +438,239 @@ for(i in 1:length(reOrd)){
 rownames(corMat)=reOrd;colnames(corMat)=reOrd
 corMat[is.na(corMat)]=0
 
-png('parameter_corrplot.png',height=800,width=900)
+png('parameter_corrplot.png',height=1000,width=1200)
 print(corrplot(corMat[reOrd,reOrd],type="upper", tl.col="black", tl.srt=45, diag=F,cl.cex=1.5,cl.lim=c(-1,1),addCoef.col = "grey80",number.cex=1))
 dev.off()
 
 formu = as.formula(paste("~",paste(reOrd,collapse="+")))
-png("parameter_pairs.png",height=800,width=800)
-pairs( formu ,data=postKept , 
+png("parameter_pairs.png",height=1100,width=1100)
+pairs( formu ,data=post , 
        diag.panel = panel.hist, 
        upper.panel = NULL , 
        labels= reOrd,
        pch=3 ,
-       col=  rep('black',dim(postKept)[1]) ,
+       col=  rep('black',dim(post)[1]) ,
        cex.labels = 1.4 , 
        cex.axis = 1)
 dev.off()
 
-
+SVD=svd(corMat)
+axes=SVD$d[1:2]*t(SVD$v)[1:2,,drop=F]
+print(sum(SVD$d[1:2])/sum(SVD$d))
+colnames(axes)=reOrd
+print(axes,digits=1)
 
 ######
 # Figure 7. Fecundity curves
 ######
 
-for(id in 1:dim(postKept)[1]){
-  it = postKept$iteration[id]
-  ich = postKept$chain[id]
-  mod = models[[ich]][as.character(it)][[1]]
+setwd(chDir)
+load(file = 'toAnalyse.Rdata')
+
+for(id in 1:dim(post)[1]){
+  it = post$iteration[id]
+  ich = post$chain[id]
+  mod = chs[[ich]][paste0('iteraction_',it)][[1]]
   M = exp(mod$lM)
   theta = mod$theta
   matur = mod$matur
   tmp = data.frame(age=1:maxAge,iteration=it,chain=ich,label=paste('ch',ich,'_it',it,sep=""),chain=as.character(ich))
-  tmp$relFecundity = sapply(1:maxAge,function(k) floor( M*k^theta / ((M*(matur-1)^theta)+k^theta)) ) /M
+  tmp$relFecundity = sapply(1:maxAge,function(k) floor( M*k^theta / ((M*(matur-1)^theta)+k^theta))/M ) 
   if(id==1){toPlot=tmp}else{toPlot=rbind(toPlot,tmp)}
+  cat('\r Processed ',round(1000*id/dim(post)[1])/10,'%')
 }
 toPlot$label=factor(toPlot$label)
 toPlot$chain = factor(toPlot$chain)
-pFec = ggplot(toPlot,aes(x=age,y=relFecundity,group=label,colour=chain))+geom_line(alpha=.5)+geom_point(alpha=.5)+ylab('Fecundity / M')+scale_y_continuous(limits=c(0,1))+theme_bw()
 
-png('Fecundity_vs_age.png')
+toPlot2 = aggregate(list(relFecundity=toPlot$relFecundity),
+                   by=list(age=toPlot$age),mean) 
+tmp = aggregate(list(minF=toPlot$relFecundity),
+                by=list(age=toPlot$age),function(x)quantile(x,prob=.025,na.rm=T)) 
+toPlot2 = cbind(toPlot2,tmp[,c('minF'),drop=F])
+tmp = aggregate(list(maxF=toPlot$relFecundity),
+                by=list(age=toPlot$age),function(x)quantile(x,prob=.975,na.rm=T)) 
+toPlot2 = cbind(toPlot2,tmp[,c('maxF'),drop=F])
+
+pFec = ggplot()+geom_line(data=toPlot2,aes(x=age,y=relFecundity))+
+  geom_point(data=toPlot2,aes(x=age,y=relFecundity))+
+  geom_ribbon(data=toPlot2,aes(x=age,ymin=minF,ymax=maxF),fill="grey50",alpha=.4)+
+  ylab('Fecundity / M')+
+  theme_bw()
+
+if(F){pFec = ggplot(toPlot,aes(x=age,y=relFecundity,group=label,colour=chain))+geom_line(alpha=.5)+geom_point(alpha=.5)+ylab('Fecundity / M')+theme_bw()}
+
+png('Fecundity_vs_age_relative.png')
 print(pFec)
 dev.off()
 
 #####
-# Figure 5. Population, cells, seeds vs time 
+# Figure 4. Population, cells, seeds vs time 
 #####
-setwd(chDir)
 
-for(id in 1:dim(postKept)[1]){
-  it = postKept$iteration[id]
-  ich = postKept$chain[id]
-  tmp=get.dynamic(models[[ich]][as.character(it)][[1]])
-  tmp$iteration=postKept$iteration[id]
-  tmp$chain = postKept$chain[id]
+setwd(chDir)
+load(file = 'toAnalyse.Rdata')
+
+for(id in 1:dim(post)[1]){
+  flush.console()
+  cat('\r sample ',id,' over ',dim(post)[1])
+  it = post$iteration[id]
+  ich = post$chain[id]
+  modo = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],allParams)
+  tmp=get.dynamic(modo)
+  tmp$iteration=post$iteration[id]
+  tmp$chain = post$chain[id]
   tmp$label = paste('ch',ich,'_it',it,sep="")
   if(id==1){toPlot=tmp}else{toPlot=rbind(toPlot,tmp)}
 }
 
 toPlot$label=factor(toPlot$label)
 toPlot$chain=factor(toPlot$chain)
-pPop = ggplot(toPlot,aes(x=year,y=log10(pop),group=label,colour=chain))+geom_line(alpha=.6)+ylab('log10-total population')+theme_bw()+theme(legend.position = "None")
-pCell = ggplot(toPlot,aes(x=year,y=nCell,group=label,colour=chain))+geom_line(alpha=.6)+ylab('Number of cells colonized')+theme_bw()
-pSee = ggplot(toPlot,aes(x=year,y=log10(seeds),group=label,colour=chain))+geom_line(alpha=.6)+ylab('log10-seeds produced')+theme_bw()+theme(legend.position = "None")
+
+setwd(chDir)
+saveRDS(toPlot,file = 'pop_and_seed_vs_year.Rdata')
+
+
+toPlot2 = readRDS(file='pop_and_seed_vs_year.Rdata')
+toPlot = aggregate(list(pop=log10(toPlot2$pop),sha=toPlot2$sha,seeds=log10(toPlot2$seeds)),
+                   by=list(year=toPlot2$year),mean) 
+tmp = aggregate(list(minPop=log10(toPlot2$pop),minSha=toPlot2$sha,minSeeds=log10(toPlot2$seeds)),
+                         by=list(year=toPlot2$year),function(x)quantile(x,prob=.025,na.rm=T)) 
+toPlot = cbind(toPlot,tmp[,c('minPop','minSha','minSeeds')])
+tmp = aggregate(list(maxPop=log10(toPlot2$pop),maxSha=toPlot2$sha,maxSeeds=log10(toPlot2$seeds)),
+                  by=list(year=toPlot2$year),function(x)quantile(x,prob=.975,na.rm=T)) 
+toPlot = cbind(toPlot,tmp[,c('maxPop','maxSha','maxSeeds')])
+
+pPop = ggplot(toPlot)+
+  geom_line(aes(x=year,y=pop),size=2)+
+  geom_ribbon(aes(x=year,ymin=minPop,ymax=maxPop),col='grey50',alpha=.4)+
+  ylab('Log10-Total population')+
+  theme_bw()+theme(text=element_text(size=20))
+pSha = ggplot(toPlot)+
+  geom_line(aes(x=year,y=sha),size=2)+
+  geom_ribbon(aes(x=year,ymin=minSha,ymax=maxSha),col='grey50',alpha=.4)+
+  ylab('Shanon entropy across cells')+
+  theme_bw()+theme(text=element_text(size=20))
+pSee = ggplot(toPlot)+
+  geom_line(aes(x=year,y=seeds),size=2)+
+  geom_ribbon(aes(x=year,ymin=minSeeds,ymax=maxSeeds),col='grey50',alpha=.4)+
+  ylab('Log10-Number of seeds produced')+
+  theme_bw()+theme(text=element_text(size=20))
+
 png('pop_and_seed_vs_year.png',height=1000,width=666)
-multiplot(list(pPop,pCell,pSee),cols=1)
+multiplot(list(pPop,pSha,pSee),cols=1)
+dev.off()
+
+#####
+# Figure XX. Invasion syndromes Legend
+#####
+
+tp = as.data.frame(
+  expand.grid(b=seq(0,1,.05),
+              r=seq(0,1,.05)))
+tp$color= sapply(1:dim(tp)[1],
+                 function(i)rgb(tp$r[i],0,tp$b[i]))
+pts = data.frame(b=c(1,0,1,.3,0),r=c(0,0,1,1,.6))
+pts$col = sapply(1:dim(pts)[1],
+                 function(i)rgb(pts$r[i],0,pts$b[i]))
+tp$color = factor(tp$color)
+pts$col=factor(pts$col)
+sizo = 1000
+p=ggplot()+
+  geom_tile(data=tp,aes(x=r,y=b,fill=color),alpha=.6)+
+  scale_fill_manual(values=levels(tp$color))+
+  geom_point(data=pts,aes(x=r,y=b,colour=col),size=round(.05*sizo))+
+  scale_colour_manual(values=levels(pts$col))+
+  scale_x_continuous(limits=c(-.3,1.3))+
+  scale_y_continuous(limits=c(-.3,1.3))+
+  theme_void()+theme(legend.position = "None")
+setwd('C:/Users/user/pCloud local/boulot/data/Invasions SA et FR/pt33/')
+jpeg('Figure_invasionSyndrome_legend.jpeg',height=sizo,width=sizo,quality=75)
+print(p)
 dev.off()
 
 
 #######
-# Figure 3 & 4. Main historical maps (MS)
+# Figure 2 & 3. Main historical maps (MS)
 #######
 
-thre = .65
-# Color code for population status:
-# Darkorchid: Certainly absent
-# Grey : Not certainly absent but not certainly increasing either
-# Blue : Certainly increasing 
-# Green : Certainly increasing only with local recruitment
-# Yellow : Certainly increasing and disseminate at short distance
-# Red : Certainly increasing and disseminate at short and long distance
 setwd(chDir)
-load(file = "preliminary_data")
-mapo = get_stamenmap( bbox = c(left=spatial_ext[1],
-                               bottom=spatial_ext[3]+1,
-                               right=spatial_ext[2],
-                               top = spatial_ext[4]), 
-                      zoom = 8, maptype = "toner-lite")
-rRef = crop(rRef,spatial_ext)
-cellsCov1 = rRef[]
-coos = as.data.frame(rasterToPoints(rRef))
-area = areas[areas$cell%in%cellsCov1,]
-cellsCov2 = area$cell[area$propLand>0]
-ctab = data.frame(arrayID=1:length(cellsCov2),cell=cellsCov2[order(cellsCov2)])
-coos = coos[coos[,3]%in%ctab$cell,]
-ctab = merge(ctab,coos,by.x="cell",by.y="layer",all.x=T)
-ctab = merge(ctab,area[area$propLand>0,],by="cell",all.x=T)
-urbo = aggregate(list(urb=areasFull$urb),by=list(cell=areasFull$cell),mean)
-ctab = merge(ctab,urbo,by="cell",all.x=T)
-load(file="data_for_model")
+load(file = 'toAnalyse.Rdata')
+thre = .65
+years = c(1980,1984,1988,1996,2008,2020)
 
-years = c(1980,1981,1984,1994,2005,2020)
-
-### Plot pop growth
-statusLevels = c('absence','uncertain','growth','intrinsic growth','spread')
-colors = c('white','gray50','royalblue2','springgreen3','firebrick1')
+### Plot pop growth 
+statusLevels = c('uncertain',
+                 'no disp & decline',
+                 'no disp but growth',
+                 'disp & growth',
+                 'disp',
+                 'disp & decline')
+colors = c('gray50',
+              rgb(0,0,0),# black
+              rgb(0,0,1),# blue
+              rgb(1,0,1),# lila
+              rgb(1,0,.2),# Red
+              rgb(.6,0,0))# rust
 #write.table(ctab,'ctab.csv',sep=";",row.names=F,col.names=T)
+pList=list()
 k=1
+subo=500
+sampo=sort(sample(1:dim(post)[1],subo,replace = F))
 for(year in years-1979){
+  cat('\n year ',year+1979,'\n \n')
   tmp=as.data.frame(
     expand.grid(cell=ctab$cell[order(ctab$arrayID)],
-                model=1:dim(postKept)[1]))
+                model=1:dim(post)[1]))
   ### Plot pop growth
-  tmp$isAbs = NA
-  tmp$Growth = NA
-  for(i in 1:dim(postKept)[1]){
-    it = postKept$iteration[i];ich = postKept$chain[i]
-    mod = models[[ich]][as.character(it)][[1]]
+  tmp$decline = NA
+  tmp$growth = NA
+  for(i in sampo){
+    flush.console()
+    cat('\r Processed ',round(100*i/dim(post)[1]),'% iterations')
+    it = post$iteration[i];ich = post$chain[i]
+    mod = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],allParams)
     nn = rowSums(mod$n[,year,])
     nn_ = rowSums(mod$n[,year+1,])
     phi = exp(mod$lphi)
-    tmp$isAbs[tmp$model==i] = nn==0
     tmp$growth[tmp$model==i] = nn_>nn 
+    tmp$decline[tmp$model==i] = nn_<nn
     Disp = mod$disp_to_from
-    seeds_local = diag(Disp) * mod$s_prod[,year]
-    survive = round((1-mod$rho)*mod$n[,year,1:(maxAge-1)])
-    COMP = sapply(1:nCell,function(j){
-      nAvail = max(mod$p[j,year+1]*area[j]*phi-sum(survive[j,]),0)
-      nSlots = max(mod$p[j,year+1]*area[j]*phi,mod$s[j,year])
-      return(nAvail/nSlots)
-    })
-    nnew = round(seeds_local * COMP * mod$p[,year+1])
-    ndie = nn[maxAge] + sum(round(mod$rho*mod$n[,year,1:(maxAge-1)]))
-    tmp$locGrowth[tmp$model==i] = nnew>ndie
+    ndie = nn[maxAge] + round(sum(mod$rho*mod$n[,year,1:(maxAge-1)]))
     diag(Disp) = 0
-    to_from = round(mod$p[,year+1]*COMP*t(mod$s_prod[,year] * t(Disp)))
+    to_from = mod$p[,year+1]*mod$COMP[,year]*t(mod$s_prod[,year] * t(Disp))
     tmp$spread[tmp$model==i] = colSums(to_from)>0
   }
+  if(sum(is.na(tmp$growth))>0){tmp=tmp[!is.na(tmp$growth),]}
   toPlot = aggregate(list(
-    isAbs=tmp$isAbs,
+    decline=tmp$decline,
     growth=tmp$growth,
     locGrowth=tmp$locGrowth,
     spread=tmp$spread),by=list(cell=tmp$cell),
-    FUN=function(bol)sum(bol)/dim(postKept)[1])
+    FUN=function(bol)sum(bol)/subo)
   toPlot = merge(toPlot,ctab,by="cell",all.x=T)
-  
   toPlot$status = NA
-  toPlot$status[toPlot$growth>thre] = "growth"
-  toPlot$status[toPlot$locGrowth>thre] = "intrinsic growth"
-  toPlot$status[toPlot$spread>thre] = "spread"
-  toPlot$status[is.na(toPlot$status) & toPlot$isAbs>thre] = "absence"
+  toPlot$status[toPlot$decline>thre & toPlot$spread<=thre] = 'no disp & decline'
+  toPlot$status[toPlot$growth>thre & toPlot$spread<=thre] = 'no disp but growth'
+  toPlot$status[toPlot$growth>thre & toPlot$spread>thre] = 'disp & growth'
+  toPlot$status[toPlot$growth<=thre & toPlot$decline<=thre & toPlot$spread>thre] = "disp"
+  toPlot$status[toPlot$decline>thre & toPlot$spread>thre] = 'disp & decline'
   toPlot$status[is.na(toPlot$status)]="uncertain"
   cd = statusLevels%in%toPlot$status
   toPlot$status = factor(toPlot$status,levels=statusLevels[cd])
   
   pList[[k]]=ggmap(mapo)+geom_tile(data=toPlot,aes(x=x,y=y,fill=status),alpha=.6)+
     scale_fill_manual(values=colors[cd])+ggtitle(as.character(1979+year))+
-    xlab('Longitude')+ylab('Latitude')+theme(legend.position="None",text=element_text(size=30))
+    xlab('Longitude')+ylab('Latitude')+
+    scale_x_continuous(limits=c(spatial_ext@xmin,spatial_ext@xmax))+
+    scale_y_continuous(limits=c(spatial_ext@ymin,spatial_ext@ymax))+
+    theme_bw()+
+    theme(legend.position="None",text=element_text(size=30))
   
-  if(year+1979==1982){
+  if(year==years[max(1,round(length(years)/2))]-1979){
     pLeg = ggmap(mapo)+geom_tile(data=toPlot,aes(x=x,y=y,fill=status),alpha=.6)+
       scale_fill_manual(values=colors[cd])+ggtitle(as.character(1979+year))+
       xlab('Longitude')+ylab('Latitude')+theme(text=element_text(size=30))
   }
-  
   k=k+1
 }
 setwd(chDir)
@@ -618,9 +685,9 @@ dev.off()
 
 ### Plot pop state
 bLabels = c(']0,q40]',']q40,q70]',']q70,q90]',']q90,q100]')
-qtLevels = c('{0}',bLabels,'uncertain')
+qtLevels = c(bLabels,'uncertain')
 popCol = colorRampPalette(colors = c('goldenrod','darkorchid4'))(length(bLabels))
-colors = c('white',popCol,'gray50') 
+colors = c(popCol,'gray50') 
 
 Obs = sapply(1:nYear,function(yea)rowSums(Y[,yea,])>0);Obs[!Obs]=NA;Obs[!is.na(Obs)]="record"
 tgObs = sapply(1:nYear,function(yea)rowSums(TG[,yea,])>0)
@@ -631,17 +698,17 @@ pList = list()
 for(year in years-1979){
   tmp=as.data.frame(
     expand.grid(cell=ctab$cell[order(ctab$arrayID)],
-                model=1:dim(postKept)[1]))
+                model=1:dim(post)[1]))
   tmp$qt = NA
-  for(i in 1:dim(postKept)[1]){
-    it = postKept$iteration[i]
-    ich = postKept$chain[i]
-    mod = models[[ich]][as.character(it)][[1]]
+  for(i in sampo){
+    it = post$iteration[i]
+    ich = post$chain[i]
+    mod = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],allParams)
     nn = sapply(1:nYear,function(yea) rowSums(mod$n[,yea,]) )
     nn = nn/max(nn,na.rm=T)
-    breakos = c(-.1,0,quantile(as.vector(nn),prob=c(.4,.7,.9)),1)
+    breakos = c(-.1,quantile(as.vector(nn),prob=c(.4,.7,.9)),1)
     nf = data.frame(num=cut(nn[,year],breaks=breakos))
-    leg = data.frame(num=levels(nf$num),qt=as.character(c('{0}',bLabels)))
+    leg = data.frame(num=levels(nf$num),qt=as.character(c(bLabels)))
     nf$qt = sapply(1:dim(nf)[1],function(ii)leg$qt[leg$num==nf$num[ii]])
     nf$qt=factor(nf$qt,levels=leg$qt[leg$qt%in%unique(nf$qt)])
     tmp$qt[tmp$model==i] = as.character(nf$qt)
@@ -649,7 +716,7 @@ for(year in years-1979){
   toPlot = aggregate(list(qt=tmp$qt),
                      by=list(cell=tmp$cell),
                      FUN=function(fac){
-                       prop=table(fac)/dim(postKept)[1]
+                       prop=table(fac)/subo
                        if(max(as.numeric(prop))>=thre){
                          return(names(prop)[which.max(as.numeric(prop))[1]])
                        }else{return('uncertain')}})
@@ -661,6 +728,8 @@ for(year in years-1979){
   toPlot$obs=factor(toPlot$obs,levels=obsLev[cdCol])
   pList[[k]]=ggmap(mapo)+geom_tile(data=toPlot,aes(x=x,y=y,fill=qt,colour=obs),alpha=.6)+
     scale_fill_manual(values=colors[cd])+
+    scale_x_continuous(limits=c(spatial_ext@xmin,spatial_ext@xmax))+
+    scale_y_continuous(limits=c(spatial_ext@ymin,spatial_ext@ymax))+
     scale_colour_manual(values=obsCol[cdCol])+
     ggtitle(as.character(1979+year))+
     xlab('Longitude')+ylab('Latitude')+theme_bw()+
@@ -673,78 +742,93 @@ multiplot(pList,cols=2)
 dev.off()
 
 
-
 #####
 # Images for Shiny app
 #####
 
+thre = .65
+setwd(chDir)
 if(!shinyDir%in%list.files()){
   dir.create(shinyDir)
 }
 
+# no disp & decline (marine = half blue)
+# no disp but growth (blue)
+# disp & growth (lila = red + blue)
+# disp (magenta = red + half blue)
+# disp & decline (rusty = half red)
+
 ### Plot pop growth 
-statusLevels = c('absence','uncertain','growth','intrinsic growth','spread')
-colorsGro = c('white','gray50','royalblue2','springgreen3','firebrick1')
+statusLevels = c('uncertain',
+                 'no disp & decline',
+                 'no disp but growth',
+                 'disp & growth',
+                 'disp',
+                 'disp & decline')
+colorsGro = c('gray50',
+              rgb(0,0,0),# black
+              rgb(0,0,1),# blue
+              rgb(1,0,1),# lila
+              rgb(1,0,.25),# red
+              rgb(.6,0,0))# rust
 
-
-bLabels = c(']0,q40]',']q40,q70]',']q70,q90]',']q90,q100]')
-qtLevels = c('{0}',bLabels,'uncertain')
+bLabels = c('[0,q40]',']q40,q70]',']q70,q90]',']q90,q100]')
+qtLevels = c(bLabels,'uncertain')
 popCol = colorRampPalette(colors = c('goldenrod','darkorchid4'))(length(bLabels))
-colors = c('white',popCol,'gray50') 
+colors = c(popCol,'gray50') 
 Obs = sapply(1:nYear,function(yea)rowSums(Y[,yea,])>0);Obs[!Obs]=NA;Obs[!is.na(Obs)]="record"
 tgObs = sapply(1:nYear,function(yea)rowSums(TG[,yea,])>0)
 obsLev = c('no record but TG records','record','not any record');obsCol = c('firebrick2','deepskyblue2','gray50')
 
 #write.table(ctab,'ctab.csv',sep=";",row.names=F,col.names=T)
+subo=200
+sampo=sort(sample(1:dim(post)[1],subo,replace = F))
 for(year in 1:nYear){
+  cat('\n year ',year,' \n')
   print(year)
   tmp=as.data.frame(
     expand.grid(cell=ctab$cell[order(ctab$arrayID)],
-                model=1:dim(postKept)[1]))
+                model=sampo,
+                growth=NA,decline=NA,locGrowth=NA,spread=NA))
   if(year<nYear){
     ### Plot pop growth
-    tmp$isAbs = NA
-    tmp$Growth = NA
-    for(i in 1:dim(postKept)[1]){
-      it = postKept$iteration[i];ich = postKept$chain[i]
-      mod = models[[ich]][as.character(it)][[1]]
+    for(i in sampo){
+      flush.console()
+      cat('\r Processed ',round(100*i/dim(post)[1]),'% iterations')
+      it = post$iteration[i];ich = post$chain[i]
+      mod = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],allParams)
       nn = rowSums(mod$n[,year,])
       nn_ = rowSums(mod$n[,year+1,])
       phi = exp(mod$lphi)
-      tmp$isAbs[tmp$model==i] = nn==0
       tmp$growth[tmp$model==i] = nn_>nn 
+      tmp$decline[tmp$model==i] = nn_<nn
       Disp = mod$disp_to_from
       seeds_local = diag(Disp) * mod$s_prod[,year]
-      survive = round((1-mod$rho)*mod$n[,year,1:(maxAge-1)])
-      COMP = sapply(1:nCell,function(j){
-        nAvail = max(mod$p[j,year+1]*area[j]*phi-sum(survive[j,]),0)
-        nSlots = max(mod$p[j,year+1]*area[j]*phi,mod$s[j,year])
-        return(nAvail/nSlots)
-      })
-      nnew = round(seeds_local * COMP * mod$p[,year+1])
-      ndie = nn[maxAge] + sum(round(mod$rho*mod$n[,year,1:(maxAge-1)]))
+      nnew = round(seeds_local * mod$COMP[,year] * mod$p[,year+1])
+      ndie = nn[maxAge] + round(sum(mod$rho*mod$n[,year,1:(maxAge-1)]))
       tmp$locGrowth[tmp$model==i] = nnew>ndie
       diag(Disp) = 0
-      to_from = round(mod$p[,year+1]*COMP*t(mod$s_prod[,year] * t(Disp)))
+      to_from = mod$p[,year+1]*mod$COMP[,year]*t(mod$s_prod[,year] * t(Disp))
       tmp$spread[tmp$model==i] = colSums(to_from)>0
     }
     toPlotGro = aggregate(list(
-      isAbs=tmp$isAbs,
+      decline=tmp$decline,
       growth=tmp$growth,
       locGrowth=tmp$locGrowth,
       spread=tmp$spread),by=list(cell=tmp$cell),
-      FUN=function(bol)sum(bol)/dim(postKept)[1])
+      FUN=function(bol)sum(bol)/subo)
     toPlotGro = merge(toPlotGro,ctab,by="cell",all.x=T)
     toPlotGro$status = NA
-    toPlotGro$status[toPlotGro$growth>thre] = "growth"
-    toPlotGro$status[toPlotGro$locGrowth>thre] = "intrinsic growth"
-    toPlotGro$status[toPlotGro$spread>thre] = "spread"
-    toPlotGro$status[is.na(toPlotGro$status) & toPlotGro$isAbs>thre] = "absence"
+    toPlotGro$status[toPlotGro$decline>thre & toPlotGro$spread<=thre] = 'no disp & decline'
+    toPlotGro$status[toPlotGro$growth>thre & toPlotGro$spread<=thre] = 'no disp but growth'
+    toPlotGro$status[toPlotGro$growth>thre & toPlotGro$spread>thre] = 'disp & growth'
+    toPlotGro$status[toPlotGro$growth<=thre & toPlotGro$decline<=thre & toPlotGro$spread>thre] = "disp"
+    toPlotGro$status[toPlotGro$decline>thre & toPlotGro$spread>thre] = 'disp & decline'
     toPlotGro$status[is.na(toPlotGro$status)]="uncertain"
     cd = statusLevels%in%toPlotGro$status
     toPlotGro$status = factor(toPlotGro$status,levels=statusLevels[cd])
     
-    pGro= ggmap(mapo)+geom_tile(data=toPlotGro,aes(x=x,y=y,fill=status),alpha=.6)+
+    pGro= ggmap(mapo)+geom_tile(data=toPlotGro,aes(x=x,y=y,fill=status),alpha=.7)+
       scale_fill_manual('growth syndrome',values=colorsGro[cd])+
       ggtitle(paste('Map of population growth syndrome in',year+1979))+
       xlab('Longitude')+ylab('Latitude')+
@@ -754,18 +838,18 @@ for(year in 1:nYear){
   }
   tmp=as.data.frame(
     expand.grid(cell=ctab$cell[order(ctab$arrayID)],
-                model=1:dim(postKept)[1]))
+                model=sampo))
   # Plot pop
   tmp$qt = NA
-  for(i in 1:dim(postKept)[1]){
-    it = postKept$iteration[i]
-    ich = postKept$chain[i]
-    mod = models[[ich]][as.character(it)][[1]]
+  for(i in sampo){
+    it = post$iteration[i]
+    ich = post$chain[i]
+    mod = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],allParams)
     nn = sapply(1:nYear,function(yea) rowSums(mod$n[,yea,]) )
     nn = nn/max(nn,na.rm=T)
-    breakos = c(-.1,0,quantile(as.vector(nn),prob=c(.4,.7,.9)),1)
+    breakos = c(-.1,quantile(as.vector(nn),prob=c(.4,.7,.9)),1)
     nf = data.frame(num=cut(nn[,year],breaks=breakos))
-    leg = data.frame(num=levels(nf$num),qt=as.character(c('{0}',bLabels)))
+    leg = data.frame(num=levels(nf$num),qt=as.character(bLabels))
     nf$qt = sapply(1:dim(nf)[1],function(ii)leg$qt[leg$num==nf$num[ii]])
     nf$qt=factor(nf$qt,levels=leg$qt[leg$qt%in%unique(nf$qt)])
     tmp$qt[tmp$model==i] = as.character(nf$qt)
@@ -773,7 +857,7 @@ for(year in 1:nYear){
   toPlotPop = aggregate(list(qt=tmp$qt),
                         by=list(cell=tmp$cell),
                         FUN=function(fac){
-                          prop=table(fac)/dim(postKept)[1]
+                          prop=table(fac)/subo
                           if(max(as.numeric(prop))>=thre){
                             return(names(prop)[which.max(as.numeric(prop))[1]])
                           }else{return('uncertain')}})
@@ -795,44 +879,60 @@ for(year in 1:nYear){
   png(paste('double_map_',year+1979,'.png',sep=""),width=1200,height=800)
   multiplot(list(pGro,pPop))
   dev.off()
+  
+  gc(reset=T)
 }
+
+
 
 #####
 # Figure 6. Relative pop and cell decrease under dispersal ablation
 #####
 
+setwd(chDir)
+load(file = 'toAnalyse.Rdata')
+post$label = paste0(post$chain,'_',post$iteration)
+
+subo = dim(post)[1]
+sampo =  sample(1:dim(post)[1],subo)
 metricos = as.data.frame(expand.grid(
   year=1:nYear,
-  label=postKept$label,
+  label=post$label[sampo],
   dispMode=c('all','onlyShort','onlyLong'),
-  nCell=NA,pop=NA))
-metricos = merge(metricos,postKept[,c('label','iteration','chain')],by="label",all.x=T)
+  sha=NA,pop=NA))
+metricos = merge(metricos,post[,c('label','iteration','chain')],by="label",all.x=T)
 metricos$chain=factor(metricos$chain)
 for(lab in unique(metricos$label)){
   it = unique(metricos$iteration[metricos$label==lab])
   ich = unique(metricos$chain[metricos$label==lab])
-  mod = models[[ich]][as.character(it)][[1]]
+  mod = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],allParams)
+  dlo=mod$d_l
+  dso=mod$d_s
   for(dispersal in c('all','onlyShort','onlyLong')){
     if(dispersal=='onlyLong'){
       mod$d_s=0
-      mod$d_l = models[[ich]][as.character(it)][[1]]$d_l
+      mod$d_l=dlo
       mod = calculate.model(mod)
     }else if(dispersal=='onlyShort'){
-      mod$d_s = models[[ich]][as.character(it)][[1]]$d_s
       mod$d_l=0
+      mod$d_s=dso
       mod = calculate.model(mod)
     }
     for(year in 1:nYear){
       cd = metricos$year==year & metricos$label==lab & metricos$dispMode==dispersal
       metricos$pop[cd] = sum(mod$n[,year,])
-      metricos$nCell[cd] = sum(rowSums(mod$n[,year,])>0)
+      ny = rowSums(mod$n[,year,]) + 1e-20
+      ny = ny/sum(ny)
+      metricos$sha[cd] = -sum(ny*log(ny))
     }
   }
 }
+tmpo = aggregate(list(pop=metricos$pop,sha=metricos$sha),by=list(year=metricos$year,dispMode=metricos$dispMode),mean)
+
 
 popRatio = as.data.frame(expand.grid(year=1:nYear,label=unique(metricos$label),dispMode=c('onlyShort','onlyLong')))
 popRatio$popDiff = NA
-popRatio$cellDiff = NA
+popRatio$shaDiff = NA
 for(i in 1:dim(popRatio)[1]){
   yearo = popRatio$year[i]
   labo = popRatio$label[i]
@@ -842,8 +942,8 @@ for(i in 1:dim(popRatio)[1]){
   popRatio$popDiff[i] = metricos$pop[cdNow & metricos$dispMode==dispo] - metricos$pop[cdNow & metricos$dispMode=="all"]
   popRatio$popDiff[i] = popRatio$popDiff[i] / metricos$pop[cdNow & metricos$dispMode=="all"]
   
-  popRatio$cellDiff[i] = metricos$nCell[cdNow & metricos$dispMode==dispo] - metricos$nCell[cdNow & metricos$dispMode=="all"]
-  popRatio$cellDiff[i] = popRatio$cellDiff[i] / metricos$nCell[cdNow & metricos$dispMode=="all"]
+  popRatio$shaDiff[i] = metricos$sha[cdNow & metricos$dispMode==dispo] - metricos$sha[cdNow & metricos$dispMode=="all"]
+  popRatio$shaDiff[i] = popRatio$sha[i] / metricos$sha[cdNow & metricos$dispMode=="all"]
   if(i/100==round(i/100)){
     flush.console()
     cat('\r Processed...',round(1000*i/dim(popRatio)[1])/10,'%')
@@ -862,10 +962,10 @@ for(i in 1:dim(tmp)[1]){
   tmp$lowerPopDiff[i] = quantile(vals,probs=Alpha/2)
   tmp$upperPopDiff[i] = quantile(vals,probs=1-Alpha/2)
   
-  vals = popRatio$cellDiff[popRatio$year==tmp$year[i] & popRatio$dispMode==tmp$dispMode[i]]
-  tmp$cellDiff[i] = mean(vals)
-  tmp$lowerCellDiff[i] = quantile(vals,probs=Alpha/2)
-  tmp$upperCellDiff[i] = quantile(vals,probs=1-Alpha/2)
+  vals = popRatio$shaDiff[popRatio$year==tmp$year[i] & popRatio$dispMode==tmp$dispMode[i]]
+  tmp$shaDiff[i] = mean(vals)
+  tmp$lowerShaDiff[i] = quantile(vals,probs=Alpha/2)
+  tmp$upperShaDiff[i] = quantile(vals,probs=1-Alpha/2)
 }
 tmp$year = tmp$year+1979
 
@@ -876,57 +976,139 @@ pPopDiff = ggplot(tmp,aes(x=year,y=popDiff,group=dispMode,colour=dispMode,fill=d
   scale_y_continuous(limits=c(-1,max(tmp$upperPopDiff)))+ylab('Relative population difference (vs full model)')+
   theme_bw()+theme(text=element_text(size=20))
 
-pCellDiff = ggplot(tmp,aes(x=year,y=cellDiff,colour=dispMode,fill=dispMode))+
+pShaDiff = ggplot(tmp,aes(x=year,y=shaDiff,colour=dispMode,fill=dispMode))+
   geom_line(size=1)+
-  geom_ribbon(aes(ymin=lowerCellDiff,ymax=upperCellDiff),alpha=0.3,size=.3)+
+  geom_ribbon(aes(ymin=lowerShaDiff,ymax=upperShaDiff),alpha=0.3,size=.3)+
   geom_point(size=2)+
-  scale_y_continuous(limits=c(-1,max(tmp$upperCellDiff)))+ylab('Relative n° of cells difference (vs full model)')+
+  scale_y_continuous(limits=c(-1,max(tmp$upperShaDiff)))+ylab('Relative Shanon entropy difference (vs full model)')+
   theme_bw()+theme(text=element_text(size=20))
 
-
 png('relative_decrease_ablation.png',width=666,height=1000)
-multiplot(list(pPopDiff,pCellDiff),cols=1)
+multiplot(list(pPopDiff,pShaDiff),cols=1)
 dev.off()
 
 #####
-# Figure S4.4 Environmental suitability
+# Figure 5. Number of new plants from long-distance dispersal vs year
 #####
 
-load(file = "preliminary_data")
-# Parameters
-rRef = crop(rRef,spatial_ext)
-cellsCov1 = rRef[]
-coos = as.data.frame(rasterToPoints(rRef))
-area = areas[areas$cell%in%cellsCov1,]
-cellsCov2 = area$cell[area$propLand>0]
-x1 = tab[tab$cell%in%cellsCov2,]
-cd = !colnames(x1)%in%c('cell','year')
-x1[,cd]=scale(x1[,cd])
-SVD=svd(x1[,cd])
-components = t(SVD$v)[1:2,]
-colnames(components) = colnames(x1[,cd])
-rownames(components) = paste('svd',1:2,sep="")
-print(components,digits=3)
-ctab = data.frame(arrayID=1:length(cellsCov2),cell=cellsCov2[order(cellsCov2)])
-coos = coos[coos[,3]%in%ctab$cell,]
-ctab = merge(ctab,coos,by.x="cell",by.y="layer",all.x=T)
-ctab = merge(ctab,area[area$propLand>0,],by="cell",all.x=T)
-load(file="data_for_model")
-#print(sum(SVD$d[1:2])/sum(SVD$d))
-#SVD=SVD$u[,1:2,drop=F]
 
-toPlot=as.data.frame(expand.grid(id=1:dim(postKept)[1],
-    parameter=c("I(svd1)","I(svd2)","I(svd1^2)",
+setwd(chDir)
+load(file = 'toAnalyse.Rdata')
+post$label = paste0(post$chain,'_',post$iteration)
+
+seedSpread = as.data.frame(expand.grid(year=1:(nYear-1),label=post$label))
+seedSpread$nSeeds = NA
+for(lab in as.character(post$label)){
+  it = post$iteration[post$label==lab]
+  ich = post$chain[post$label==lab]
+  mod = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],allParams)
+  phi = exp(mod$lphi)
+  Disp = mod$disp_to_from
+  diag(Disp) = 0
+  Disp[Adj[]>0]=0
+  prodPerYear = rep(NA,nYear-1)
+  for(year in 1:(nYear-1)){
+    print(year)
+    to_from = mod$p[,year+1]*mod$COMP[,year]*t(mod$s_prod[,year] * t(Disp))
+    prodPerYear[year]=sum(to_from)
+  }
+  seedSpread$nSeeds[seedSpread$label==lab] = prodPerYear
+  flush.console()
+  ii = which(post$label==lab)
+  cat('\r Processed ',round(1000*ii/dim(post)[1])/10,'%')
+}
+
+saveRDS(seedSpread,file = "seedSpread")
+
+alpha = .05
+oneCurve = aggregate(list(mean=seedSpread$nSeeds),
+                     by=list(year=seedSpread$year),function(x)mean(log10(x)))
+toAdd = aggregate(list(qt2.5=seedSpread$nSeeds),
+                  by=list(year=seedSpread$year),function(x)quantile(log10(x),prob=alpha/2))
+toAdd2 = aggregate(list(qt97.5=seedSpread$nSeeds),
+                  by=list(year=seedSpread$year),function(x)quantile(log10(x),prob=1-alpha/2))
+oneCurve=cbind(oneCurve,toAdd[,'qt2.5',drop=F],toAdd2[,'qt97.5',drop=F])
+oneCurve$Year=oneCurve$year+1979
+
+p=ggplot(oneCurve)+
+  geom_line(aes(x=Year,y=mean),size=2)+
+  geom_ribbon(aes(x=Year,ymin=qt2.5,ymax=qt97.5),col="grey20",alpha=0.4)+
+  ylab('log10-Number of new plants from L.D. dispersal')+
+  theme_bw()+theme(text=element_text(size=20))
+
+png('LDD_log10plants_vs_year.png',height=600,width=900)
+print(p)
+dev.off()
+
+
+#####
+# Figure 1. Initial Populations
+#####
+
+idIni = which(initN>0)
+iniAge = as.data.frame(expand.grid(cell=idIni,
+                                   label=post$label,
+                                   meanAge=NA,
+                                   maxAge=NA,
+                                   popIni=NA))
+for(lab in as.character(post$label)){
+  it = post$iteration[post$label==lab]
+  ich = post$chain[post$label==lab]
+  flush.console()
+  cat('\r sample ',which(post$label==lab),' over ',dim(post)[1])
+  mod = chs[[ich]][paste0('iteraction_',it)][[1]]
+  iniAge$meanAge[iniAge$label==lab] = maxAge * mod$avgAgeRatioIni[idIni]
+  if(F){iniAge$maxAge[iniAge$label==lab] = sapply(idIni,function(id){
+    probas = choose(maxAge,0:maxAge)*(mod$avgAgeRatioIni[id]^c(0:maxAge)) * (1-mod$avgAgeRatioIni[id])^(maxAge:0)
+    max(which(round(probas*mod$popIni[id])>0),0)
+  })}
+  iniAge$popIni[iniAge$label==lab] = mod$popIni[idIni]
+}
+
+toPlot = aggregate(list(meanAge=iniAge$meanAge,popIni=iniAge$popIni),
+                   by=list(cell=iniAge$cell),mean)
+sdPop = aggregate(list(sdPop=iniAge$popIni),
+                  by=list(cell=iniAge$cell),sd)
+toPlot$sdPop = sdPop$sdPop
+#toPlot$popIni[toPlot$sdPop/toPlot$popIni>.6] = NA
+
+toPlot = merge(ctab,toPlot,by.x='arrayID',by.y='cell')
+
+p2=ggmap(mapo)+geom_tile(data=toPlot,aes(x=x,y=y,fill=meanAge),alpha=.6)+
+  xlab('Longitude')+ylab('Latitude')+
+  scale_x_continuous(limits=c(spatial_ext@xmin,spatial_ext@xmax))+
+  scale_y_continuous(limits=c(spatial_ext@ymin,spatial_ext@ymax))+
+  theme_bw()+
+  theme(text=element_text(size=30))
+
+p1=ggmap(mapo)+geom_tile(data=toPlot,aes(x=x,y=y,fill=popIni),alpha=.6)+
+  xlab('Longitude')+ylab('Latitude')+
+  scale_fill_gradient2(mid='white',high="red")+
+  scale_x_continuous(limits=c(spatial_ext@xmin,spatial_ext@xmax))+
+  scale_y_continuous(limits=c(spatial_ext@ymin,spatial_ext@ymax))+
+  theme_bw()+
+  theme(text=element_text(size=30))
+
+png('Figure_initial_pop.png',height=1000,width=1000)
+multiplot(list(p1,p2),cols=1)
+dev.off()
+
+#####
+# Figure S5.1 Environmental suitability
+#####
+
+toPlot=as.data.frame(expand.grid(id=1:dim(post)[1],
+    parameter=c('Itcpt',"I(svd1)","I(svd2)","I(svd1^2)",
     "I(svd2^2)","forest","crop","urb"),
     value=NA,iteration=NA,chain=NA,label=NA))
 
-for(id in 1:dim(postKept)[1]){
+for(id in 1:dim(post)[1]){
   cd1 = toPlot$id==id
-  it = postKept$iteration[id]
-  ich = postKept$chain[id]
-  mod=models[[ich]][as.character(it)][[1]]
+  it = post$iteration[id]
+  ich = post$chain[id]
+  mod=chs[[ich]][paste0('iteraction_',it)][[1]]
   Beta = mod$Beta
-  names(Beta) = dimnames(x)[[3]]
+  names(Beta) = c('Itcpt',dimnames(x)[[3]])
   toPlot$iteration[cd1]=it
   toPlot$chain[cd1] = ich
   toPlot$label[cd1] = paste('ch',ich,'_it',it,sep="")
@@ -941,113 +1123,81 @@ p=ggplot(toPlot,aes(x=parameter,y=value))+
   geom_boxplot()+
   geom_point(aes(colour=chain))+theme_bw()+theme(text=element_text(size=20))
 
-png('Beta.png',width=650,height=450)
+png('Figure_Beta.png',width=650,height=450)
 print(p)
 dev.off()
 
-parSdTab = data.frame(id=1)
-rownames(parSdTab)='Std. deviation'
-for(par in as.character(unique(toPlot$parameter))){
-  eval(parse(text=paste('parSdTab[,"',par,'"]=',sd(x[,,par]),sep="")))
-}
-print(parSdTab[,-1],digits=3)
-
-if(F){
-  xScale=seq(min(x[,,'I(svd1)']),max(x[,,'I(svd1)']),length.out=50)
-  yScale=seq(min(x[,,'I(svd2)']),max(x[,,'I(svd2)']),length.out=50)
-  toPlot = data.frame(svd1=1,svd2=1,val=1,label=NA);toPlot=toPlot[-1,,drop=F]
-  enviVar = c('I(svd1)','I(svd2)','I(svd1^2)','I(svd2^2)')
-  for(id in 1:dim(postKept)[1]){
-    cd1 = toPlot$id==id
-    it = postKept$iteration[id]
-    ich = postKept$chain[id]
-    mod=models[[ich]][as.character(it)][[1]]
-    Beta = mod$Beta
-    names(Beta) = dimnames(x)[[3]]
-    Beta = matrix(Beta[enviVar],length(enviVar),1)
-    tmp1 = as.data.frame(expand.grid(
-      svd1 = xScale,svd2 = yScale))
-    tmp = model.matrix(object = as.formula(paste('~-1+',paste(enviVar,collapse="+"))),data=tmp1)
-    tmpVal = as.vector(tmp %*% Beta)
-    tmp1$val = exp(tmpVal)/(1+exp(tmpVal))
-    tmp1$label = postKept$label[id]
-    toPlot=rbind(toPlot,tmp1)
-  }
-  toPlot=merge(toPlot,postKept[,c('label','chain')],by="label",all.x=T)
-  toPlotTmp = toPlot[toPlot$chain%in%c(1,2,4,3),,drop=F]
-  toPloto = aggregate(list(val=toPlotTmp$val),
-                      by=list(svd1=toPlotTmp$svd1,svd2=toPlotTmp$svd2),
-                      mean)
-  plotM = matrix(toPloto$val,
-                 length(unique(toPlot$svd1)),
-                 length(unique(toPlot$svd2)))
-  contour(unique(toPlot$svd1),unique(toPlot$svd2),plotM,
-          nlevels=8,lwd=2,labcex=1,
-          xlab="svd1",ylab="svd2")
-}
-
 #####
-# Figure S6.6 Validation
+# Figure S7.1 & 2 Validation
 #####
 
-load(file="validation_kit")
+load(file = 'toAnalyse_Validation.Rdata')
 
 valid$legend = 'data deficient'
 valid$legend[valid$nNoDetec>0] = 'training cell'
 valid$legend[valid$valid] = "validation cell"
 valid$legend = factor(valid$legend,levels=c('data deficient','training cell',"validation cell"))
-p = ggmap(mapo)+geom_tile(data=valid,aes(x=x,y=y,fill=legend),alpha=.6)+scale_fill_manual('Cell data type',values=c("gray50",'firebrick1','chartreuse2'))+xlab('Longitude')+ylab('Latitude')+theme(text=element_text(size=20))
+p = ggmap(mapo)+
+  geom_tile(data=valid,
+            aes(x=x,y=y,fill=legend),alpha=.6)+
+  scale_fill_manual('Cell data type',values=c("gray50",'firebrick1','chartreuse2'))+
+  xlab('Longitude')+ylab('Latitude')+
+  theme(text=element_text(size=20))
 
+setwd(chDir)
 png('map_validation_cells.png',width=1000,height=400)
 print(p)
 dev.off()
 
 # Compute correlation prediction vs nEst (ground truth) per model
-
 yearBreaks= c(1999,2015,2021)
-
 volumes$period = cut(volumes$year+1979,breaks=yearBreaks)
-
-postKept$label = paste('ch',postKept$chain,'_it',postKept$iteration,sep="")
-
+postV$label = paste('ch',postV$chain,'_it',postV$iteration,sep="")
 validCells = valid$cell[valid$valid]
 
 metrics = as.data.frame(expand.grid(
   period=levels(volumes$period),
-  label=postKept$label,
+  label=postV$label,
   validation=c(F,T),
   cor=NA,
   auc=NA))
-for(i in 1:dim(metrics)[1]){
-  per = metrics$period[i]
-  lab = metrics$label[i]
-  it = postKept$iteration[postKept$label==lab]
-  ich = postKept$chain[postKept$label==lab]
-  mod = models[[ich]][as.character(it)][[1]]
-  
-  if(metrics$validation[i]){
-    tmp = volumes[!is.na(volumes$period) & volumes$period==per & volumes$cell%in%valid$cell[valid$valid] & volumes$tg>0,]
-  }else{
-    tmp = volumes[!is.na(volumes$period) & volumes$period==per & !volumes$cell%in%valid$cell[valid$valid] & volumes$tg>0,]
+
+for(lab in as.character(postV$label)){
+  it = postV$iteration[postV$label==lab]
+  ich = postV$chain[postV$label==lab]
+  mod = get.model(chs[[ich]][paste0('iteraction_',it)][[1]],params = allParams)
+  for(per in levels(volumes$period)){
+    for(valido in c(F,T)){
+      if(valido){
+        tmp = volumes[!is.na(volumes$period) & volumes$period==per & volumes$cell%in%valid$cell[valid$valid] & volumes$tg>0,]
+      }else{
+        tmp = volumes[!is.na(volumes$period) & volumes$period==per & !volumes$cell%in%valid$cell[valid$valid] & volumes$tg>0,]
+      }
+      tmp=refineSample(tmp)
+      tmp = merge(tmp,valid[,c('cell','arrayID')],by="cell",all.x=T)
+      tmp$nPred = sapply(1:dim(tmp)[1],function(j)sum(mod$n[tmp$arrayID[j],tmp$year[j],]))
+      metrics$cor[metrics$label==lab & metrics$period==per & metrics$validation==valido] = cor(tmp$nPred,tmp$y/tmp$tg)
+      metrics$auc[metrics$label==lab & metrics$period==per & metrics$validation==valido] = auc_wmw(1.*tmp$y>0,tmp$nPred)
+    }
   }
-  tmp=refineSample(tmp)
-  tmp = merge(tmp,valid[,c('cell','arrayID')],by="cell",all.x=T)
-  tmp$nPred = sapply(1:dim(tmp)[1],function(j)sum(mod$n[tmp$arrayID[j],tmp$year[j],]))
-  metrics$cor[i] = cor(tmp$nPred,tmp$y/tmp$tg)
-  metrics$auc[i] = auc_wmw(tmp$y>0,tmp$nPred)
-  #plot(tmp$nPred,tmp$y/TestTmp$tg,ylab="n detections / n TG records",xlab="Predicted population")
+  i=which(postV$label==lab)
   if(i/5==round(i/5)){
     flush.console()
-    cat('\r Processed ',round(1000*i/dim(metrics)[1])/10,'%')
+    cat('\r Processed ',round(1000*i/dim(postV)[1])/10,'%')
   }
 }
 
-metrics = merge(metrics,postKept[,c('label','chain')],by="label",all.x=T)
+metrics = merge(metrics,postV[,c('label','chain')],by="label",all.x=T)
 
 metrics$grouping = paste(metrics$period,metrics$validation)
 metrics$grouping =sapply(1:dim(metrics)[1],function(i)if(metrics$validation[i]){paste(metrics$period[i],'valid.')}else{paste(metrics$period[i],'train')})
+means = aggregate(list(auc=metrics$auc,cor=metrics$cor),
+                  by=list(grouping=metrics$grouping),mean)
+
+
 pValid = ggplot(metrics,aes(x=grouping,y=auc))+geom_violin(aes(fill=validation),alpha=.4)+
-  geom_point(aes(group=chain,color=chain), position=position_dodge(width=.15))+
+  geom_point(aes(group=chain),colour='grey50',position=position_dodge(width=.15))+
+  geom_point(data=means,aes(x=grouping,y=auc),size=4)+
   xlab('Time period - validation/training')+
   ylab('AUC')+
   theme_bw()+theme(text=element_text(size=23))
@@ -1055,6 +1205,4 @@ pValid = ggplot(metrics,aes(x=grouping,y=auc))+geom_violin(aes(fill=validation),
 png('auc_valid_vs_train_periods.png',height=600,width=800)
 print(pValid)
 dev.off()
-
-#?wilcox.test()$statistic
 
