@@ -1,5 +1,7 @@
 # plectranthus_barbatus
-This code reproduces the results and Figures from "Dynamic species distribution modeling reveals the pivotal role of human-mediated long-distance dispersal in plant invasion"
+This code reproduces the results and Figures from our article
+Botella, C., Bonnet, P., Hui, C., Joly, A., & Richardson, D. M. (2022). Dynamic Species Distribution Modeling Reveals the Pivotal Role of Human-Mediated Long-Distance Dispersal in Plant Invasion. Biology, 11(9), 1293.
+https://doi.org/10.3390/biology11091293
 
 Guidelines to reproduce:
 1) Download data files (**data_for_model, data_full, validation_kit, toAnalyse_Validation.Rdata** and pre-fitted posterior samples if needed) from our Zenodo repository (V2): https://doi.org/10.5281/zenodo.6921965
